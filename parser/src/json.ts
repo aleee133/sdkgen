@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Annotation, Type } from "./ast";
 import {
+  StatusCodeAnnotation,
   ArrayType,
   AstRoot,
   DescriptionAnnotation,
@@ -22,7 +23,7 @@ import { analyse } from "./semantic/analyser";
 import type { DeepReadonly } from "./utils";
 import { primitiveToAstClass } from "./utils";
 
-export type TypeDescription = string | string[] | Record<string, string>;
+export type TypeDescription = string | Array<string | [string, string]> | Record<string, string>;
 
 type TypeTable = Record<string, TypeDescription | undefined>;
 
@@ -49,6 +50,10 @@ type AnnotationJson =
       value: null;
     }
   | {
+      type: "statusCode";
+      value: number;
+    }
+  | {
       type: "rest";
       value: {
         bodyVariable: string | null;
@@ -73,12 +78,14 @@ function annotationToJson(ann: Annotation): AnnotationJson {
         headers: [...ann.headers.entries()].sort(([a], [b]) => a.localeCompare(b)),
         method: ann.method,
         path: ann.path,
-        pathVariables: [...ann.pathVariables].sort((a, b) => a.localeCompare(b)),
+        pathVariables: ann.pathVariables,
         queryVariables: [...ann.queryVariables].sort((a, b) => a.localeCompare(b)),
       },
     };
   } else if (ann instanceof HiddenAnnotation) {
     return { type: "hidden", value: null };
+  } else if (ann instanceof StatusCodeAnnotation) {
+    return { type: "statusCode", value: ann.statusCode };
   }
 
   throw new Error(`BUG: annotationToJson with ${ann.constructor.name}`);
@@ -98,6 +105,8 @@ function annotationFromJson(json: AnnotationJson | DeepReadonly<AnnotationJson>)
 
     case "hidden":
       return new HiddenAnnotation();
+    case "statusCode":
+      return new StatusCodeAnnotation(json.value);
 
     default:
       throw new Error(`BUG: annotationFromJson with ${(json as { type: string }).type}`);
@@ -107,7 +116,7 @@ function annotationFromJson(json: AnnotationJson | DeepReadonly<AnnotationJson>)
 export interface AstJson {
   typeTable: TypeTable;
   functionTable: FunctionTable;
-  errors: Array<string | string[]>;
+  errors: Array<string | [string, string]>;
   annotations: Record<string, AnnotationJson[] | undefined>;
 }
 
@@ -126,6 +135,10 @@ export function astToJson(ast: AstRoot): AstJson {
   }
 
   for (const { name, fields } of ast.structTypes) {
+    if (name in typeTable) {
+      throw new Error(`Duplicate struct type ${name}`);
+    }
+
     typeTable[name] = {};
     const obj = typeTable[name] as Record<string, TypeDescription>;
 
@@ -136,6 +149,7 @@ export function astToJson(ast: AstRoot): AstJson {
         if (ann instanceof DescriptionAnnotation) {
           const target = `type.${name}.${field.name}`;
 
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
           annotations[target] ??= [];
           annotations[target].push(annotationToJson(ann));
         }
@@ -144,7 +158,17 @@ export function astToJson(ast: AstRoot): AstJson {
   }
 
   for (const { name, values } of ast.enumTypes) {
-    typeTable[name] = values.map(v => v.value);
+    if (name in typeTable) {
+      throw new Error(`Duplicate enum type ${name}`);
+    }
+
+    typeTable[name] = values.map(v => {
+      if (!v.struct) {
+        return v.value;
+      }
+
+      return [v.value, v.struct.name] as [string, string];
+    });
   }
 
   for (const { name, type } of ast.typeDefinitions) {
@@ -166,6 +190,7 @@ export function astToJson(ast: AstRoot): AstJson {
         if (ann instanceof DescriptionAnnotation) {
           const target = `fn.${op.name}.${arg.name}`;
 
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
           annotations[target] ??= [];
           annotations[target].push(annotationToJson(ann));
         }
@@ -180,12 +205,25 @@ export function astToJson(ast: AstRoot): AstJson {
     for (const ann of op.annotations) {
       const target = `fn.${op.name}`;
 
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       annotations[target] ??= [];
       annotations[target].push(annotationToJson(ann));
     }
   }
 
-  const errors = ast.errors.map(error => (error.dataType instanceof VoidPrimitiveType ? error.name : [error.name, error.dataType.name]));
+  const errors = ast.errors.map(error =>
+    error.dataType instanceof VoidPrimitiveType ? error.name : ([error.name, error.dataType.name] as [string, string]),
+  );
+
+  for (const error of ast.errors) {
+    for (const ann of error.annotations) {
+      const target = `error.${error.name}`;
+
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      annotations[target] ??= [];
+      annotations[target].push(annotationToJson(ann));
+    }
+  }
 
   return {
     annotations,
@@ -198,6 +236,7 @@ export function astToJson(ast: AstRoot): AstJson {
 export function jsonToAst(json: DeepReadonly<AstJson>): AstRoot {
   const operations: FunctionOperation[] = [];
   const typeDefinition: TypeDefinition[] = [];
+  const solveEnumValueStructRef: Array<[EnumValue, string]> = [];
 
   function processType(description: DeepReadonly<TypeDescription>, typeName?: string): Type {
     if (typeof description === "string") {
@@ -213,13 +252,26 @@ export function jsonToAst(json: DeepReadonly<AstJson>): AstRoot {
 
       return new TypeReference(description);
     } else if (Array.isArray(description)) {
-      return new EnumType(description.map(v => new EnumValue(v)));
+      return new EnumType(
+        description.map(v => {
+          if (Array.isArray(v)) {
+            const [value, structName] = v as [string, string];
+            const enumValue = new EnumValue(value);
+
+            solveEnumValueStructRef.push([enumValue, structName]);
+
+            return enumValue;
+          }
+
+          return new EnumValue(v as string);
+        }),
+      );
     }
 
     const fields: Field[] = [];
 
     for (const fieldName of Object.keys(description)) {
-      const field = new Field(fieldName, processType((description as { [name: string]: TypeDescription })[fieldName]));
+      const field = new Field(fieldName, processType((description as Record<string, string>)[fieldName]));
 
       if (typeName) {
         const target = `type.${typeName}.${fieldName}`;
@@ -263,12 +315,32 @@ export function jsonToAst(json: DeepReadonly<AstJson>): AstRoot {
     operations.push(op);
   }
 
+  for (const [enumValue, structName] of solveEnumValueStructRef) {
+    const struct = typeDefinition.find(def => def.name === structName)?.type;
+
+    if (struct instanceof StructType) {
+      enumValue.struct = struct;
+    }
+  }
+
   const errors = json.errors.map(error => {
+    let errorNode;
+
     if (Array.isArray(error)) {
-      return new ErrorNode(error[0], processType(error[1]));
+      const [name, type] = error as [string, string];
+
+      errorNode = new ErrorNode(name, processType(type));
+    } else {
+      errorNode = new ErrorNode(error as string, new VoidPrimitiveType());
     }
 
-    return new ErrorNode(error as string, new VoidPrimitiveType());
+    const target = `error.${errorNode.name}`;
+
+    for (const annotationJson of json.annotations[target] ?? []) {
+      errorNode.annotations.push(annotationFromJson(annotationJson));
+    }
+
+    return errorNode;
   });
 
   const ast = new AstRoot(typeDefinition, operations, errors);

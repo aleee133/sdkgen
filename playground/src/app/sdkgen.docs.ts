@@ -6,6 +6,7 @@ import {
   FloatPrimitiveType,
   BigIntPrimitiveType,
   MoneyPrimitiveType,
+  DecimalPrimitiveType,
   DatePrimitiveType,
   DateTimePrimitiveType,
   BoolPrimitiveType,
@@ -38,7 +39,9 @@ export const primitiveTypes: Record<string, string> = {
   FloatPrimitiveType: "Um número de ponto flutuante de 64 bits, similar ao double do C.",
   BigIntPrimitiveType: "Um número inteiro sem limite de precisão. Na maioria das plataformas este tipo é mais custoso.",
   MoneyPrimitiveType:
-    "Um número inteiro com precisão estendida, mas performático. Está no intervalo de -9007199254740991 a 9007199254740991. Útil para operações financeiras",
+    "Um número inteiro com precisão estendida, mas performático. Está no intervalo de -9007199254740991 a 9007199254740991. Útil para operações financeiras.",
+  DecimalPrimitiveType:
+    "Um número inteiro ou fracionado representado por dígitos decimais e com precisão dinâmica. Útil para operações financeiras.",
   DatePrimitiveType:
     "Representa conceitualmente uma data do calendário Gregoriano. Essa mesma data pode representar diferentes momento no tempo a depender da timezone. Para especificar um ponto no tempo utilize datetime.",
   DateTimePrimitiveType:
@@ -68,6 +71,7 @@ export const primitiveTypesExamples: Record<string, string[]> = {
   FloatPrimitiveType: ["0.0", "1.050654", "-3454.6396854"],
   BigIntPrimitiveType: ["87175082235506108544888893172310", "0", "1"],
   MoneyPrimitiveType: ["100", "-450954636342", "121611633162977184630315"],
+  DecimalPrimitiveType: ["100", "-10.35", "0.00498375617834", "3864958512342567"],
   DatePrimitiveType: ["2020-01-01", "1950-04-15", "2194-12-31"],
   DateTimePrimitiveType: ["2020-01-01T00:00:00.000", "1950-04-15T02:11:58.892", "2194-12-31T23:31:58.491"],
   BoolPrimitiveType: ["true", "false"],
@@ -111,6 +115,8 @@ export function getConstructorName(type: Type) {
       return "BigIntPrimitiveType";
     case MoneyPrimitiveType:
       return "MoneyPrimitiveType";
+    case DecimalPrimitiveType:
+      return "DecimalPrimitiveType";
     case DatePrimitiveType:
       return "DatePrimitiveType";
     case DateTimePrimitiveType:
@@ -164,6 +170,7 @@ export function getTypeLabels(type: Type) {
     case FloatPrimitiveType:
     case BigIntPrimitiveType:
     case MoneyPrimitiveType:
+    case DecimalPrimitiveType:
     case DatePrimitiveType:
     case DateTimePrimitiveType:
     case BoolPrimitiveType:
@@ -218,7 +225,7 @@ export interface TypeDoc {
 
   structFields?: Array<{
     name: string;
-    type: Type;
+    type: Type | null;
     description?: string;
     secret: boolean;
   }>;
@@ -232,6 +239,7 @@ export function getTypeDoc(type: Type): TypeDoc {
     case FloatPrimitiveType:
     case BigIntPrimitiveType:
     case MoneyPrimitiveType:
+    case DecimalPrimitiveType:
     case DatePrimitiveType:
     case DateTimePrimitiveType:
     case BoolPrimitiveType:
@@ -279,14 +287,33 @@ export function getTypeDoc(type: Type): TypeDoc {
     }
 
     case EnumType:
-      const values = (type as EnumType).values.map(v => v.value);
+      const enu = type as EnumType;
+      const values = enu.values.slice(0, 3);
+      const examples = values.map(v => {
+        if (v.struct) {
+          return `${v.value}: ${JSON.stringify(new SdkgenService().buildJsonObject(v.struct.fields), null, 2)}`;
+        }
+
+        return v.value;
+      });
 
       return {
         longDescription:
           "enum representa um conjunto limitado de possibilidades de valores, similar as enumerações em outras linguagens.",
-        shortDescription: `(enum) ${values.slice(0, 3).join(", ")}${values.length > 3 ? "…" : ""}`,
-        examples: values,
+        shortDescription: `(enum) ${values.map(v => `${v.value}${v.struct ? "(…)" : ""}`).join(", ")}${
+          values.length > 3 ? "…" : ""
+        }`,
+        examples,
         isEnum: true,
+        isStruct: true,
+        structFields: enu.values.map(value => ({
+          name: value.value,
+          type: value.struct,
+          description: (
+            value.annotations.find(ann => ann instanceof DescriptionAnnotation) as DescriptionAnnotation | undefined
+          )?.text,
+          secret: false,
+        })),
       };
 
     case StructType:

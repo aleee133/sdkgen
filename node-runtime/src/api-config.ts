@@ -6,7 +6,7 @@ import type { DeepReadonly } from "./utils";
 
 type Middleware<ExtraContextT> = (ctx: Context & ExtraContextT, next: () => Promise<ContextReply>) => Promise<ContextReply>;
 
-export abstract class BaseApiConfig<ExtraContextT = unknown> {
+export class BaseApiConfig<ExtraContextT = unknown> {
   private _ast: AstRoot | undefined;
 
   get ast() {
@@ -15,9 +15,8 @@ export abstract class BaseApiConfig<ExtraContextT = unknown> {
 
   astJson!: DeepReadonly<AstJson>;
 
-  fn: {
-    [name: string]: ((args: any) => Promise<any>) | undefined;
-  } = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fn: Record<string, ((ctx: Context & ExtraContextT, args: any) => Promise<any>) | undefined> = {};
 
   readonly middlewares: Array<Middleware<ExtraContextT>> = [];
 

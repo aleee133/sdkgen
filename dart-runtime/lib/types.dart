@@ -1,4 +1,9 @@
 import 'dart:convert';
+import 'package:decimal/decimal.dart';
+
+import 'http_client.dart';
+
+typedef Json = Map<String, dynamic>;
 
 class SdkgenTypeException implements Exception {
   String cause;
@@ -33,7 +38,7 @@ class FunctionDescription {
 
 class SdkgenErrorDescription {
   String dataType;
-  Function create;
+  SdkgenError Function(String msg, Json req, dynamic data) create;
   SdkgenErrorDescription(this.dataType, this.create);
 }
 
@@ -43,24 +48,28 @@ class LatLng {
   LatLng(this.lat, this.lng);
 }
 
-const simpleStringTypes = ['string', 'cnpj', 'cpf', 'email', 'html', 'xml'];
-var simpleTypes = [
-      'json',
-      'bool',
-      'url',
-      'int',
-      'uint',
-      'float',
-      'money',
-      'hex',
-      'uuid',
-      'base64',
-      'void'
-    ] +
-    simpleStringTypes;
+const simpleStringTypes = {'string', 'cnpj', 'cpf', 'email', 'html', 'xml'};
+const simpleTypes = {
+  'json',
+  'bool',
+  'url',
+  'int',
+  'uint',
+  'float',
+  'money',
+  'hex',
+  'uuid',
+  'base64',
+  'void',
+  ...simpleStringTypes,
+};
 
 dynamic simpleEncodeDecode(
-    Map<String, Object> typeTable, String path, String type, Object? value) {
+  Map<String, Object> typeTable,
+  String path,
+  String type,
+  Object? value,
+) {
   if (simpleStringTypes.contains(type)) {
     if (value is! String) {
       throw SdkgenTypeException(
@@ -142,7 +151,11 @@ dynamic simpleEncodeDecode(
 }
 
 dynamic encode(
-    Map<String, Object> typeTable, String path, Object type, Object? value) {
+  Map<String, Object> typeTable,
+  String path,
+  Object type,
+  Object? value,
+) {
   if (type is EnumTypeDescription) {
     if (!type.enumValues.contains(value) || value == null) {
       throw SdkgenTypeException(
@@ -154,11 +167,16 @@ dynamic encode(
       throw SdkgenTypeException(
           'Invalid Type at \'$path\', expected ${type.type}, got ${jsonEncode(value)}');
     }
-    var map = Function.apply(type.exportAsMap, [value]) as Map<String, Object?>;
-    var resultMap = {};
+    final map =
+        Function.apply(type.exportAsMap, [value]) as Map<String, Object?>;
+    final resultMap = {};
     map.forEach((fieldName, fieldValue) {
       resultMap[fieldName] = encode(
-          typeTable, '$path.$fieldName', type.fields[fieldName]!, fieldValue);
+        typeTable,
+        '$path.$fieldName',
+        type.fields[fieldName]!,
+        fieldValue,
+      );
     });
     return resultMap;
   } else if (type is String) {
@@ -167,7 +185,11 @@ dynamic encode(
         return null;
       } else {
         return encode(
-            typeTable, path, type.substring(0, type.length - 1), value);
+          typeTable,
+          path,
+          type.substring(0, type.length - 1),
+          value,
+        );
       }
     } else if (type.endsWith('[]')) {
       if (value is! List) {
@@ -177,8 +199,12 @@ dynamic encode(
       return value
           .asMap()
           .entries
-          .map((entry) => encode(typeTable, '$path[${entry.key}]',
-              type.substring(0, type.length - 2), entry.value))
+          .map((entry) => encode(
+                typeTable,
+                '$path[${entry.key}]',
+                type.substring(0, type.length - 2),
+                entry.value,
+              ))
           .toList();
     } else {
       switch (type) {
@@ -206,6 +232,17 @@ dynamic encode(
                 'Invalid Type at \'$path\', expected ${jsonEncode(type)}, got ${jsonEncode(value)}');
           }
           return value.toUtc().toIso8601String().replaceAll('Z', '');
+        case 'decimal':
+          if (value is Decimal) {
+            return value.toString();
+          }
+          if (value is! num &&
+              (value is! String ||
+                  !RegExp(r'^-?[0-9]+(?:\.[0-9]+)?$').hasMatch(value))) {
+            throw SdkgenTypeException(
+                'Invalid Type at \'$path\', expected ${jsonEncode(type)}, got ${jsonEncode(value)}');
+          }
+          return Decimal.parse("$value").toString();
         default:
           if (simpleTypes.contains(type)) {
             return simpleEncodeDecode(typeTable, path, type, value);
@@ -236,10 +273,14 @@ dynamic decode(
       throw SdkgenTypeException(
           'Invalid Type at \'$path\', expected ${type.type}, got ${jsonEncode(value)}');
     }
-    var resultMap = {};
+    final resultMap = {};
     for (var fieldName in type.fields.keys) {
-      resultMap[fieldName] = decode(typeTable, '$path.$fieldName',
-          type.fields[fieldName]!, value[fieldName]);
+      resultMap[fieldName] = decode(
+        typeTable,
+        '$path.$fieldName',
+        type.fields[fieldName]!,
+        value[fieldName],
+      );
     }
     return Function.apply(type.createFromFields, [resultMap]);
   } else if (type is String) {
@@ -248,7 +289,11 @@ dynamic decode(
         return null;
       } else {
         return decode(
-            typeTable, path, type.substring(0, type.length - 1), value);
+          typeTable,
+          path,
+          type.substring(0, type.length - 1),
+          value,
+        );
       }
     } else if (type.endsWith('[]')) {
       if (value is! List) {
@@ -258,8 +303,12 @@ dynamic decode(
       return value
           .asMap()
           .entries
-          .map((entry) => decode(typeTable, '$path[${entry.key}]',
-              type.substring(0, type.length - 2), entry.value))
+          .map((entry) => decode(
+                typeTable,
+                '$path[${entry.key}]',
+                type.substring(0, type.length - 2),
+                entry.value,
+              ))
           .toList();
     } else {
       switch (type) {
@@ -294,6 +343,14 @@ dynamic decode(
                 'Invalid Type at \'$path\', expected ${jsonEncode(type)}, got ${jsonEncode(value)}');
           }
           return DateTime.parse('${value}Z').toLocal();
+        case 'decimal':
+          if (value is! num &&
+              (value is! String ||
+                  !RegExp(r'^-?[0-9]+(?:\.[0-9]+)?$').hasMatch(value))) {
+            throw SdkgenTypeException(
+                'Invalid Type at \'$path\', expected ${jsonEncode(type)}, got ${jsonEncode(value)}');
+          }
+          return Decimal.parse("$value");
         default:
           if (simpleTypes.contains(type)) {
             return simpleEncodeDecode(typeTable, path, type, value);

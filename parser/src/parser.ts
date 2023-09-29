@@ -3,6 +3,7 @@
 
 import type { Annotation, Type } from "./ast";
 import {
+  StatusCodeAnnotation,
   ArgDescriptionAnnotation,
   ArrayType,
   AstRoot,
@@ -24,16 +25,7 @@ import {
 import { Lexer } from "./lexer";
 import { parseRestAnnotation } from "./restparser";
 import { analyse } from "./semantic/analyser";
-import type {
-  CommaSymbolToken,
-  CurlyCloseSymbolToken,
-  FalseKeywordToken,
-  ImportKeywordToken,
-  ParensCloseSymbolToken,
-  SpreadSymbolToken,
-  Token,
-  TrueKeywordToken,
-} from "./token";
+import type { CurlyCloseSymbolToken, FalseKeywordToken, ImportKeywordToken, SpreadSymbolToken, Token, TrueKeywordToken } from "./token";
 import {
   AnnotationToken,
   ArraySymbolToken,
@@ -49,6 +41,8 @@ import {
   PrimitiveTypeToken,
   StringLiteralToken,
   TypeKeywordToken,
+  CommaSymbolToken,
+  ParensCloseSymbolToken,
 } from "./token";
 import { primitiveToAstClass } from "./utils";
 
@@ -86,7 +80,7 @@ export class Parser {
     throw "Not implemented";
   };
 
-  constructor(source: Lexer | string) {
+  constructor(source: Lexer | string | Array<Lexer | string>) {
     try {
       // eslint-disable-next-line
       this.readFileSync = require("fs").readFileSync;
@@ -94,11 +88,9 @@ export class Parser {
       // do nothing
     }
 
-    if (source instanceof Lexer) {
-      this.lexers = [source];
-    } else {
-      this.lexers = [new Lexer(this.readFileSync(source).toString(), source)];
-    }
+    const sources = Array.isArray(source) ? [...source].reverse() : [source];
+
+    this.lexers = sources.map(x => (x instanceof Lexer ? x : new Lexer(this.readFileSync(x).toString(), x)));
 
     this.nextToken();
   }
@@ -235,6 +227,17 @@ export class Parser {
           this.annotations.push(new HiddenAnnotation().at(this.token));
 
           break;
+        case "statusCode": {
+          const statusCode = parseInt(body, 10);
+
+          if (statusCode.toString() !== body.trim()) {
+            throw new ParserError(`@statusCode annotation takes an integer as argument`);
+          }
+
+          this.annotations.push(new StatusCodeAnnotation(statusCode).at(this.token));
+          break;
+        }
+
         default:
           throw new ParserError(`Unknown annotation '${words[0]}' at ${this.token.location}`);
       }
@@ -276,7 +279,6 @@ export class Parser {
   }
 
   private parseError(): ErrorNode {
-    this.checkCannotHaveAnnotationsHere();
     const errorToken = this.expect(ErrorKeywordToken);
 
     this.nextToken();
@@ -290,7 +292,7 @@ export class Parser {
 
     this.nextToken();
 
-    let type = new VoidPrimitiveType();
+    let type: Type = new VoidPrimitiveType();
 
     if (
       this.token instanceof CurlyOpenSymbolToken ||
@@ -301,7 +303,11 @@ export class Parser {
       type = this.parseType();
     }
 
-    return new ErrorNode(name, type).at(errorToken);
+    const node = new ErrorNode(name, type).at(errorToken);
+
+    node.annotations = this.annotations;
+    this.annotations = [];
+    return node;
   }
 
   private parseOperation() {
@@ -394,7 +400,7 @@ export class Parser {
 
     annotations = annotations.filter(ann => !(ann instanceof ArgDescriptionAnnotation));
 
-    let returnType = new VoidPrimitiveType().at(parensCloseToken);
+    let returnType: Type = new VoidPrimitiveType().at(parensCloseToken);
 
     if (this.token instanceof ColonSymbolToken) {
       this.nextToken();
@@ -436,6 +442,42 @@ export class Parser {
           enumValue.annotations = this.annotations;
           this.annotations = [];
           enumType.values.push(enumValue);
+          this.nextToken();
+
+          if (!(this.token instanceof ParensOpenSymbolToken)) {
+            return;
+          }
+
+          this.nextToken();
+          const fieldNames = new Set<string>();
+          const fields = [];
+
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          while (this.token && this.token.maybeAsIdentifier() instanceof IdentifierToken) {
+            const field = this.parseField();
+
+            // "tag" is a reserved name on tagged enum fields and can't be used.
+            if (field.name === "tag") {
+              field.name = "_tag";
+            }
+
+            if (fieldNames.has(field.name)) {
+              throw new ParserError(`Cannot redeclare argument '${field.name}'`);
+            }
+
+            fieldNames.add(field.name);
+            fields.push(field);
+
+            if (this.token instanceof CommaSymbolToken) {
+              this.nextToken();
+            } else {
+              break;
+            }
+          }
+
+          enumValue.struct = new StructType(fields).atLocation(enumValue.location);
+
+          this.expect(ParensCloseSymbolToken);
           this.nextToken();
         },
       });

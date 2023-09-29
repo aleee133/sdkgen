@@ -1,6 +1,7 @@
 import * as CNPJ from "@fnando/cnpj";
 import * as CPF from "@fnando/cpf";
 import type { AstJson, TypeDescription } from "@sdkgen/parser";
+import { Decimal } from "decimal.js";
 
 import type { DeepReadonly } from "./utils";
 
@@ -9,11 +10,13 @@ type TypeTable = AstJson["typeTable"];
 const simpleStringTypes = ["string", "email", "html", "xml"];
 const simpleTypes = ["json", "bool", "url", "int", "uint", "float", "money", "hex", "uuid", "base64", "void", ...simpleStringTypes];
 
+type ExpandRecursively<T> = T extends object ? (T extends infer O ? { [K in keyof O]: ExpandRecursively<O[K]> } : never) : T;
+
 type JsonType = number | string | boolean | null | JsonType[] | { [Key in string]: JsonType };
 
-type AnyDecodedType = number | string | boolean | null | bigint | Buffer | Date | AnyDecodedType[] | { [Key in string]: AnyDecodedType };
+type AnyDecodedType = number | string | boolean | null | bigint | Decimal | Buffer | Date | AnyDecodedType[] | { [Key in string]: AnyDecodedType };
 
-type DecodedType<Type, Table extends object> = TypeDescription extends Type
+export type DecodedType<Type, Table extends object = {}> = TypeDescription extends Type
   ? AnyDecodedType
   : Type extends "string" | "email" | "html" | "xml" | "url" | "hex" | "uuid" | "base64" | "cpf" | "cnpj"
   ? string
@@ -29,16 +32,18 @@ type DecodedType<Type, Table extends object> = TypeDescription extends Type
   ? bigint
   : Type extends "bytes"
   ? Buffer
+  : Type extends "decimal"
+  ? Decimal
   : Type extends "date" | "datetime"
   ? Date
   : Type extends `${infer X}?`
   ? DecodedType<X, Table> | null
   : Type extends `${infer X}[]`
   ? Array<DecodedType<X, Table>>
-  : Type extends string[]
-  ? Type[number]
-  : Type extends readonly string[]
-  ? Type[number]
+  : Type extends Array<string | [string, string]>
+  ? DecodedEnumType<Type, Table>
+  : Type extends ReadonlyArray<string | readonly [string, string]>
+  ? DecodedEnumType<Type, Table>
   : Type extends object
   ? { -readonly [Key in keyof Type]: DecodedType<Type[Key], Table> }
   : object extends Table
@@ -47,7 +52,23 @@ type DecodedType<Type, Table extends object> = TypeDescription extends Type
   ? DecodedType<Table[Type], Table>
   : never;
 
-type EncodedType<Type, Table extends object> = TypeDescription extends Type
+type DecodedEnumType<
+  Type extends Array<string | [string, string]> | ReadonlyArray<string | readonly [string, string]>,
+  Table extends object,
+> = Type[number] extends string ? Type[number] : DecodeTaggedEnumValueType<Type[number], Table>;
+
+type DecodeTaggedEnumValueType<
+  ValueType extends string | [string, string] | readonly [string, string],
+  Table extends object,
+> = ValueType extends string
+  ? { tag: ValueType }
+  : ValueType extends [infer Tag, infer Struct]
+  ? ExpandRecursively<{ tag: Tag } & DecodedType<Struct, Table>>
+  : ValueType extends readonly [infer Tag, infer Struct]
+  ? ExpandRecursively<{ tag: Tag } & DecodedType<Struct, Table>>
+  : never;
+
+export type EncodedType<Type, Table extends object = {}> = TypeDescription extends Type
   ? JsonType
   : Type extends "string" | "email" | "html" | "xml" | "url" | "hex" | "uuid" | "base64" | "cpf" | "cnpj"
   ? string
@@ -59,22 +80,30 @@ type EncodedType<Type, Table extends object> = TypeDescription extends Type
   ? null
   : Type extends "int" | "uint" | "float" | "money"
   ? number
-  : Type extends "bigint" | "bytes" | "date" | "datetime"
+  : Type extends "bigint" | "bytes" | "date" | "datetime" | "decimal"
   ? string
   : Type extends `${infer X}?`
   ? EncodedType<X, Table> | null
   : Type extends `${infer X}[]`
   ? Array<EncodedType<X, Table>>
-  : Type extends string[]
-  ? Type[number]
-  : Type extends readonly string[]
-  ? Type[number]
+  : Type extends Array<string | [string, string]>
+  ? EnumEncodedValueType<Type[number], Table>
+  : Type extends ReadonlyArray<string | readonly [string, string]>
+  ? EnumEncodedValueType<Type[number], Table>
   : Type extends object
   ? { -readonly [Key in keyof Type]: EncodedType<Type[Key], Table> }
   : object extends Table
   ? never
   : Type extends keyof Table
   ? EncodedType<Table[Type], Table>
+  : never;
+
+type EnumEncodedValueType<ValueType extends string | [string, string] | readonly [string, string], Table extends object> = ValueType extends string
+  ? ValueType
+  : ValueType extends [infer Tag, infer Struct]
+  ? [Tag, EncodedType<Struct, Table>]
+  : ValueType extends readonly [infer Tag, infer Struct]
+  ? [Tag, EncodedType<Struct, Table>]
   : never;
 
 class ParseError extends Error {
@@ -87,7 +116,7 @@ class ParseError extends Error {
       str = String(value);
     }
 
-    super(`Invalid type at '${path}', expected ${type}, got ${str}`);
+    super(`Invalid type at '${path}', expected ${String(type)}, got ${str}`);
   }
 }
 
@@ -184,11 +213,38 @@ export function encode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
   if (typeof type === "string" && !type.endsWith("?") && type !== "void" && (value === null || value === undefined)) {
     throw new Error(`Invalid type at '${path}', cannot be null`);
   } else if (Array.isArray(type)) {
-    if (typeof value !== "string" || !type.includes(value)) {
-      throw new ParseError(path, type, value);
+    if (type.every(tag => typeof tag === "string")) {
+      for (const tag of type) {
+        if (tag === value) {
+          return tag as EncodedType<Type, Table>;
+        }
+      }
+    } else if (typeof value === "object" && value && "tag" in value) {
+      const { tag: tagValue, ...restValue } = value as object & { tag: unknown };
+
+      for (const entry of type) {
+        if (typeof entry === "string") {
+          if (entry === tagValue) {
+            return entry as EncodedType<Type, Table>;
+          }
+        } else {
+          const [tag, valueType] = entry as [string, string];
+
+          if (tag === tagValue) {
+            const encodedValues = encode(typeTable, `${path}.${tag}`, valueType, restValue) as object;
+
+            // eslint-disable-next-line max-depth
+            if (Object.values(encodedValues).every(v => v === null)) {
+              return tag as EncodedType<Type, Table>;
+            }
+
+            return [tag, encodedValues] as EncodedType<Type, Table>;
+          }
+        }
+      }
     }
 
-    return value as EncodedType<Type, Table>;
+    throw new ParseError(path, type, value);
   } else if (typeof type === "object") {
     if (typeof value !== "object") {
       throw new ParseError(path, type, value);
@@ -244,7 +300,12 @@ export function encode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
       throw new ParseError(path, type, value);
     }
 
-    return (typeof value === "string" ? new Date(value).toISOString().split("T")[0] : value.toISOString().split("T")[0]) as EncodedType<Type, Table>;
+    const dateValue = value instanceof Date ? value : new Date(value);
+
+    return `${dateValue.getFullYear().toString().padStart(4, "0")}-${(dateValue.getMonth() + 1).toString().padStart(2, "0")}-${dateValue
+      .getDate()
+      .toString()
+      .padStart(2, "0")}` as EncodedType<Type, Table>;
   } else if (type === "datetime") {
     if (
       !(value instanceof Date && !isNaN(value.getTime())) &&
@@ -257,6 +318,12 @@ export function encode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
     }
 
     return (typeof value === "string" ? new Date(value) : value).toISOString().replace("Z", "") as EncodedType<Type, Table>;
+  } else if (type === "decimal") {
+    if (typeof value !== "number" && (typeof value !== "string" || !/^-?[0-9]+(?:\.[0-9]+)?$/u.test(value)) && !Decimal.isDecimal(value)) {
+      throw new ParseError(path, type, value);
+    }
+
+    return new Decimal(value).toString() as EncodedType<Type, Table>;
   } else {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     const resolved = (typeTable as Record<string, TypeDescription>)[type as string];
@@ -265,7 +332,7 @@ export function encode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
       return encode(typeTable, path, resolved, value) as EncodedType<Type, Table>;
     }
 
-    throw new Error(`Unknown type '${type}' at '${path}'`);
+    throw new Error(`Unknown type '${String(type)}' at '${path}'`);
   }
 }
 
@@ -278,11 +345,35 @@ export function decode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
   if (typeof type === "string" && !type.endsWith("?") && type !== "void" && (value === null || value === undefined)) {
     throw new Error(`Invalid type at '${path}', cannot be null`);
   } else if (Array.isArray(type)) {
-    if (typeof value !== "string" || !type.includes(value)) {
-      throw new ParseError(path, type, value);
+    if (type.every(tag => typeof tag === "string")) {
+      for (const tag of type) {
+        if (tag === value) {
+          return tag as DecodedType<Type, Table>;
+        }
+      }
+    } else {
+      for (const entry of type) {
+        if (typeof entry === "string") {
+          if (entry === value) {
+            return { tag: entry } as DecodedType<Type, Table>;
+          }
+        } else {
+          const [tag, valueType] = entry as [string, string];
+
+          if (tag === value) {
+            const decodedValues = decode(typeTable, `${path}.${tag}`, valueType, {}) as object;
+
+            return { ...decodedValues, tag } as DecodedType<Type, Table>;
+          } else if (Array.isArray(value) && value.length === 2 && tag === value[0]) {
+            const decodedValues = decode(typeTable, `${path}.${tag}`, valueType, value[1]) as object;
+
+            return { ...decodedValues, tag } as DecodedType<Type, Table>;
+          }
+        }
+      }
     }
 
-    return value as DecodedType<Type, Table>;
+    throw new ParseError(path, type, value);
   } else if (typeof type === "object") {
     if (typeof value !== "object") {
       throw new ParseError(path, type, value);
@@ -300,7 +391,7 @@ export function decode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
       return null as DecodedType<Type, Table>;
     }
 
-    return decode(typeTable, path, type.slice(0, type.length - 1), value) as DecodedType<Type, Table>;
+    return decode(typeTable, path, type.slice(0, type.length - 1), value) as unknown as DecodedType<Type, Table>;
   } else if (typeof type === "string" && type.endsWith("[]")) {
     if (!Array.isArray(value)) {
       throw new ParseError(path, type, value);
@@ -311,13 +402,13 @@ export function decode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
     return simpleEncodeDecode(path, type, value) as DecodedType<Type, Table>;
   } else if (type === "bytes") {
     if (typeof value !== "string") {
-      throw new ParseError(path, `${type} (base 64)`, value);
+      throw new ParseError(path, `${String(type)} (base 64)`, value);
     }
 
     const buffer = Buffer.from(value, "base64");
 
     if (buffer.toString("base64") !== value) {
-      throw new ParseError(path, `${type} (base 64)`, value);
+      throw new ParseError(path, `${String(type)} (base 64)`, value);
     }
 
     return buffer as DecodedType<Type, Table>;
@@ -360,15 +451,21 @@ export function decode<Table extends DeepReadonly<TypeTable>, Type extends DeepR
     }
 
     return new Date(`${value.endsWith("Z") ? value : value.concat("Z")}`) as DecodedType<Type, Table>;
+  } else if (type === "decimal") {
+    if (typeof value !== "number" && (typeof value !== "string" || !/^-?[0-9]+(?:\.[0-9]+)?$/u.test(value))) {
+      throw new ParseError(path, type, value);
+    }
+
+    return new Decimal(value) as DecodedType<Type, Table>;
   } else {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     const resolved = (typeTable as Record<string, TypeDescription>)[type as string];
 
     if (resolved) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-      return decode(typeTable, path, resolved, value) as DecodedType<Type, Table>;
+      return decode(typeTable, path, resolved, value) as unknown as DecodedType<Type, Table>;
     }
 
-    throw new Error(`Unknown type '${type}' at '${path}'`);
+    throw new Error(`Unknown type '${String(type)}' at '${path}'`);
   }
 }

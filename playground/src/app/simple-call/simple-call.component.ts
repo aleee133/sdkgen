@@ -26,7 +26,10 @@ export class SimpleCallComponent implements OnInit, OnDestroy {
 
   client?: SdkgenHttpClient;
   code = "";
+  initialExtras = `{\n  "key": "value"\n}\n`;
+  extras = this.initialExtras;
   response?: any;
+  busy = false;
 
   selected = new FormControl(0);
   consoleItems: ConsoleItem[] = [];
@@ -49,18 +52,29 @@ export class SimpleCallComponent implements OnInit, OnDestroy {
   }
 
   async run() {
-    {
-      // eslint-disable-next-line
-      const events = this.consoleItems;
-
-      eval(wrapper);
-    }
-
-    const exec = (this.client as unknown as Record<string, (data: any) => Promise<any>>)[this.fn](
-      JSON.parse(this.code),
-    );
-
     try {
+      this.busy = true;
+
+      {
+        // eslint-disable-next-line
+        const events = this.consoleItems;
+
+        eval(wrapper);
+      }
+
+      if (this.extras && this.extras !== this.initialExtras) {
+        const extrasJson = JSON.parse(this.extras);
+        const extraKeys = Object.keys(extrasJson);
+
+        for (const key of extraKeys) {
+          this.client?.extra.set(key, extrasJson[key]);
+        }
+      }
+
+      const exec = (this.client as unknown as Record<string, (data: any) => Promise<any>>)[this.fn](
+        JSON.parse(this.code),
+      );
+
       this.response = { result: await exec };
     } catch (e: any) {
       this.consoleItems.push({ type: ConsoleItemType.ERROR, message: e.toString() });
@@ -74,7 +88,8 @@ export class SimpleCallComponent implements OnInit, OnDestroy {
       };
     } finally {
       eval(unwrap);
-      this.selected.setValue(1);
+      this.selected.setValue(2);
+      this.busy = false;
     }
   }
 

@@ -4,12 +4,13 @@ import Alamofire
 open class SdkgenHttpClient {
     
     public var baseUrl: String
+    public var extraJson: [String : Any] = [:]
        
     public init(baseUrl: String) {
         self.baseUrl = baseUrl
     }
     
-    public func request<T: Codable>(_ name: String, _ args: [String: Any], _ timeoutSeconds: Double? = nil, completion: @escaping (T) -> Void, onError: @escaping (SdkgenResponse.SdkgenError) -> Void) {
+    public func makeRequest<T: Codable>(_ name: String, _ args: [String: Any], _ timeoutSeconds: Double? = nil, completion: @escaping (T) -> Void, onError: @escaping (SdkgenResponse.SdkgenError) -> Void) {
 
         let body: [String : Any] = [
             "version": 3,
@@ -17,6 +18,7 @@ open class SdkgenHttpClient {
             "deviceInfo": SdkgenDevice.device(),
             "name": name,
             "args": args,
+            "extra": extraJson
         ]
         
         let url = baseUrl.last != "/" ? baseUrl.appending("/\(name)") : baseUrl.appending(name)

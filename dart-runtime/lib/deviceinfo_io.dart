@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:package_info/package_info.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 Future<Map<String, Object?>> getDeviceInfo(String deviceId) async {
   PackageInfo? packageInfo;
@@ -12,7 +12,7 @@ Future<Map<String, Object?>> getDeviceInfo(String deviceId) async {
   } catch (e) {}
 
   final window =
-      PlatformDispatcher.instance.views.whereType<FlutterWindow>().first;
+      PlatformDispatcher.instance.views.whereType<FlutterView>().first;
   final screenSize = window.physicalSize / window.devicePixelRatio;
 
   final platform = {

@@ -1,4 +1,4 @@
-export type TypeDescription = string | string[] | Record<string, string>;
+export type TypeDescription = string | Array<string | [string, string]> | Record<string, string>;
 
 export type TypeTable = Record<string, TypeDescription | undefined>;
 export type FunctionTable = Record<
@@ -22,6 +22,10 @@ type AnnotationJson =
   | {
       type: "hidden";
       value: null;
+    }
+  | {
+      type: "statusCode";
+      value: number;
     }
   | {
       type: "rest";

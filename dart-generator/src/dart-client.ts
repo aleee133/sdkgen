@@ -1,17 +1,27 @@
 import type { AstRoot } from "@sdkgen/parser";
-import { OptionalType, HiddenAnnotation, VoidPrimitiveType } from "@sdkgen/parser";
+import { DecimalPrimitiveType, OptionalType, HiddenAnnotation, VoidPrimitiveType, BytesPrimitiveType, hasType } from "@sdkgen/parser";
 
 import { cast, generateClass, generateEnum, generateErrorClass, generateTypeName, mangle } from "./helpers";
 
 export function generateDartClientSource(ast: AstRoot): string {
   let code = "";
 
-  code += `import 'dart:typed_data';
+  code += `// ignore_for_file: constant_identifier_names
+`;
 
-import 'package:flutter/widgets.dart';
+  if (hasType(ast, BytesPrimitiveType)) {
+    code += `import 'dart:typed_data';
+`;
+  }
+
+  if (hasType(ast, DecimalPrimitiveType)) {
+    code += `import 'package:decimal/decimal.dart';
+`;
+  }
+
+  code += `import 'package:http/http.dart' as http;
 import 'package:sdkgen_runtime/types.dart';
 import 'package:sdkgen_runtime/http_client.dart';
-
 `;
 
   for (const type of ast.enumTypes) {
@@ -30,21 +40,21 @@ import 'package:sdkgen_runtime/http_client.dart';
   }
 
   code += `class ApiClient extends SdkgenHttpClient {
-  ApiClient(String baseUrl, [BuildContext? context]) : super(baseUrl, context, _typeTable, _fnTable, _errTable);
+  ApiClient(String baseUrl, [http.Client? client]) : super(baseUrl, client, _typeTable, _fnTable, _errTable);
 ${ast.operations
   .filter(op => op.annotations.every(ann => !(ann instanceof HiddenAnnotation)))
   .map(
     op => `
   ${op.returnType instanceof VoidPrimitiveType ? "Future<void> " : `Future<${generateTypeName(op.returnType)}> `}${op.name}(${
-      op.args.length === 0
-        ? ""
-        : `{${op.args
-            .map(arg => `${arg.type instanceof OptionalType ? "" : "required "}${generateTypeName(arg.type)} ${mangle(arg.name)}`)
-            .join(", ")}}`
-    }) async { ${op.returnType instanceof VoidPrimitiveType ? "" : "return "}${cast(
-      `await makeRequest('${op.name}', {${op.args.map(arg => `'${arg.name}': ${mangle(arg.name)}`).join(", ")}})`,
-      op.returnType,
-    )}; }`,
+    op.args.length === 0
+      ? ""
+      : `{${op.args
+          .map(arg => `${arg.type instanceof OptionalType ? "" : "required "}${generateTypeName(arg.type)} ${mangle(arg.name)}`)
+          .join(", ")}}`
+  }) async { ${op.returnType instanceof VoidPrimitiveType ? "" : "return "}${cast(
+    `await makeRequest('${op.name}', {${op.args.map(arg => `'${arg.name}': ${mangle(arg.name)}`).join(", ")}})`,
+    op.returnType,
+  )}; }`,
   )
   .join("")}
 }\n\n`;
@@ -99,7 +109,9 @@ ${ast.operations
   for (const error of ast.errors) {
     const hasData = !(error.dataType instanceof VoidPrimitiveType);
 
-    code += `  '${error.name}': SdkgenErrorDescription('${error.dataType.name}', (msg, data) => ${error.name}(msg${hasData ? ", data" : ""})),\n`;
+    const dataArg = hasData ? ", data" : "";
+
+    code += `  '${error.name}': SdkgenErrorDescription('${error.dataType.name}', (msg, req, data) => ${error.name}(msg, req${dataArg})),\n`;
   }
 
   code += `};\n`;

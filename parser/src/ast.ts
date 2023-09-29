@@ -22,7 +22,7 @@ export abstract class AstNode {
 export abstract class Type extends AstNode {
   abstract get name(): string;
 
-  toJSON() {
+  toJSON(): unknown {
     const { name: _name, ...rest } = { ...this };
 
     return rest;
@@ -30,7 +30,12 @@ export abstract class Type extends AstNode {
 }
 
 export class ErrorNode extends AstNode {
-  constructor(public name: string, public dataType: Type) {
+  annotations: Annotation[] = [];
+
+  constructor(
+    public name: string,
+    public dataType: Type,
+  ) {
     super();
   }
 }
@@ -49,7 +54,10 @@ export class ThrowsAnnotation extends Annotation {
 }
 
 export class ArgDescriptionAnnotation extends Annotation {
-  constructor(public argName: string, public text: string) {
+  constructor(
+    public argName: string,
+    public text: string,
+  ) {
     super();
   }
 }
@@ -69,7 +77,17 @@ export class RestAnnotation extends Annotation {
 
 export class HiddenAnnotation extends Annotation {}
 
-export abstract class PrimitiveType extends Type {}
+export class StatusCodeAnnotation extends Annotation {
+  constructor(public statusCode: number) {
+    super();
+  }
+}
+
+export abstract class PrimitiveType extends Type {
+  toJSON() {
+    return this.name;
+  }
+}
 export class StringPrimitiveType extends PrimitiveType {
   name = "string";
 }
@@ -102,6 +120,9 @@ export class VoidPrimitiveType extends PrimitiveType {
 }
 export class MoneyPrimitiveType extends PrimitiveType {
   name = "money";
+}
+export class DecimalPrimitiveType extends PrimitiveType {
+  name = "decimal";
 }
 export class CpfPrimitiveType extends PrimitiveType {
   name = "cpf";
@@ -157,6 +178,8 @@ export class ArrayType extends Type {
 export class EnumValue extends AstNode {
   annotations: Annotation[] = [];
 
+  struct: StructType | null = null;
+
   constructor(public value: string) {
     super();
   }
@@ -168,12 +191,20 @@ export class EnumType extends Type {
   constructor(public values: EnumValue[]) {
     super();
   }
+
+  get hasStructValues() {
+    return this.values.some(v => v.struct !== null);
+  }
 }
 
 export class Field extends AstNode {
   annotations: Annotation[] = [];
 
-  constructor(public name: string, public type: Type, public secret = false) {
+  constructor(
+    public name: string,
+    public type: Type,
+    public secret = false,
+  ) {
     super();
   }
 }
@@ -205,7 +236,10 @@ export class StructType extends Type {
 export class TypeDefinition extends AstNode {
   annotations: Annotation[] = [];
 
-  constructor(public name: string, public type: Type) {
+  constructor(
+    public name: string,
+    public type: Type,
+  ) {
     super();
   }
 }
@@ -215,7 +249,11 @@ export class FunctionOperation extends AstNode {
 
   args: Field[] = [];
 
-  constructor(public name: string, public fieldsAndSpreads: Array<Field | Spread>, public returnType: Type) {
+  constructor(
+    public name: string,
+    public fieldsAndSpreads: Array<Field | Spread>,
+    public returnType: Type,
+  ) {
     super();
   }
 }
@@ -227,5 +265,9 @@ export class AstRoot {
 
   warnings: string[] = [];
 
-  constructor(public typeDefinitions: TypeDefinition[] = [], public operations: FunctionOperation[] = [], public errors: ErrorNode[] = []) {}
+  constructor(
+    public typeDefinitions: TypeDefinition[] = [],
+    public operations: FunctionOperation[] = [],
+    public errors: ErrorNode[] = [],
+  ) {}
 }

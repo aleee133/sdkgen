@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { createReadStream, createWriteStream, unlink } from "fs";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import { createServer } from "http";
+import type { AddressInfo } from "net";
 import { hostname } from "os";
 import { parse as parseQuerystring } from "querystring";
 import { parse as parseUrl } from "url";
@@ -9,9 +10,12 @@ import { promisify } from "util";
 
 import { generateCSharpServerSource } from "@sdkgen/csharp-generator";
 import { generateDartClientSource } from "@sdkgen/dart-generator";
+import { generateFSharpServerSource } from "@sdkgen/fsharp-generator";
 import { generateAndroidClientSource } from "@sdkgen/kotlin-generator";
 import type { AstRoot } from "@sdkgen/parser";
 import {
+  StatusCodeAnnotation,
+  DecimalPrimitiveType,
   Base64PrimitiveType,
   BigIntPrimitiveType,
   BoolPrimitiveType,
@@ -66,11 +70,21 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
 
   public introspection = true;
 
+  public log = (message: string) => {
+    console.log(`${new Date().toISOString()} ${message}`);
+  };
+
   private hasSwagger = false;
 
   private ignoredUrlPrefix = "";
 
-  constructor(public apiConfig: BaseApiConfig<ExtraContextT>, private extraContext: ExtraContextT) {
+  private extraContext: ExtraContextT;
+
+  constructor(
+    public apiConfig: BaseApiConfig<ExtraContextT>,
+    ...maybeExtraContext: {} extends ExtraContextT ? [{}?] : [ExtraContextT]
+  ) {
+    this.extraContext = (maybeExtraContext[0] ?? {}) as ExtraContextT;
     this.httpServer = createServer(this.handleRequest.bind(this));
     this.enableCors();
     this.attachRestHandlers();
@@ -79,6 +93,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
       ["/targets/android/client.kt", (ast: AstRoot) => generateAndroidClientSource(ast, true)],
       ["/targets/android/client_without_callbacks.kt", (ast: AstRoot) => generateAndroidClientSource(ast, false)],
       ["/targets/dotnet/api.cs", generateCSharpServerSource],
+      ["/targets/dotnet/api.fs", generateFSharpServerSource],
       ["/targets/flutter/client.dart", generateDartClientSource],
       ["/targets/ios/client.swift", (ast: AstRoot) => generateSwiftClientSource(ast, false)],
       ["/targets/ios/client-rx.swift", (ast: AstRoot) => generateSwiftClientSource(ast, true)],
@@ -156,32 +171,32 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
   async listen(port = 8000): Promise<void> {
     return new Promise(resolve => {
       this.httpServer.listen(port, () => {
-        const addr = this.httpServer.address();
-        let addrString: string | undefined;
+        const addr = this.httpServer.address() as AddressInfo;
+        let urlHost: string;
 
-        if (addr === null) {
-          addrString = undefined;
-        } else if (typeof addr === "string") {
-          addrString = addr;
+        if (addr.address === "::") {
+          urlHost = `localhost:${addr.port}`;
+        } else if (addr.family === "ipv6") {
+          urlHost = `[${addr.address}]:${addr.port}`;
         } else {
-          addrString = `${addr.address}:${addr.port}`;
+          urlHost = `${addr.address}:${addr.port}`;
         }
 
-        if (!addrString) {
-          console.log(`Listening.`);
-          resolve();
-          return;
+        if (addr.address === "::" || addr.address === "0.0.0.0") {
+          console.log(`\nListening on port ${addr.port}`);
+        } else {
+          console.log(`\nListening on port ${addr.port} (${addr.address})`);
         }
-
-        console.log(`Listening on ${addrString}`);
 
         if (this.introspection) {
-          console.log(`Access the sdkgen Playground at http://${addrString}/playground`);
+          console.log(`Playground: http://${urlHost}/playground`);
         }
 
         if (this.hasSwagger) {
-          console.log(`Access the REST API Swagger at http://${addrString}/swagger`);
+          console.log(`Swagger UI: http://${urlHost}/swagger`);
         }
+
+        console.log("");
 
         resolve();
       });
@@ -339,8 +354,6 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
             if (!ann.bodyVariable && req.headers["content-type"]?.match(/^application\/x-www-form-urlencoded/iu)) {
               const parsedBody = parseQuerystring(body.toString());
 
-              console.log("parsedBody", parsedBody);
-
               for (const argName of ann.queryVariables) {
                 const argValue = parsedBody[argName] ?? null;
 
@@ -351,7 +364,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                 simpleArgs.set(argName, Array.isArray(argValue) ? argValue.join("") : argValue);
               }
             } else if (!ann.bodyVariable && req.headers["content-type"]?.match(/^multipart\/form-data/iu)) {
-              const busboy = new Busboy({ headers: req.headers });
+              const busboy = Busboy({ headers: req.headers });
               const filePromises: Array<Promise<void>> = [];
 
               busboy.on("field", (field, value) => {
@@ -360,7 +373,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                 }
               });
 
-              busboy.on("file", (_field, file, name) => {
+              busboy.on("file", (_field, stream, info) => {
                 const tempName = randomBytes(32).toString("hex");
                 const writeStream = createWriteStream(tempName);
 
@@ -371,7 +384,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                     writeStream.on("close", () => {
                       const contents = createReadStream(tempName);
 
-                      files.push({ contents, name });
+                      files.push({ contents, name: info.filename });
 
                       contents.on("open", () => {
                         unlink(tempName, err => {
@@ -385,7 +398,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                     });
 
                     writeStream.on("open", () => {
-                      file.pipe(writeStream);
+                      stream.pipe(writeStream);
                     });
                   }),
                 );
@@ -427,6 +440,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                     type instanceof DatePrimitiveType ||
                     type instanceof DateTimePrimitiveType ||
                     type instanceof MoneyPrimitiveType ||
+                    type instanceof DecimalPrimitiveType ||
                     type instanceof BigIntPrimitiveType ||
                     type instanceof CpfPrimitiveType ||
                     type instanceof CnpjPrimitiveType ||
@@ -508,12 +522,28 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
               version: 3,
             };
 
-            await this.executeRequest(request, (_ctx, reply) => {
+            await this.executeRequest(request, (ctx, reply) => {
               try {
+                if (ctx) {
+                  for (const [headerKey, headerValue] of ctx.response.headers.entries()) {
+                    res.setHeader(headerKey, headerValue);
+                  }
+                }
+
+                if (ctx?.response.statusCode) {
+                  res.statusCode = ctx.response.statusCode;
+                }
+
                 if (reply.error) {
                   const error = this.makeResponseError(reply.error);
 
-                  res.statusCode = error.type === "Fatal" ? 500 : 400;
+                  if (!ctx?.response.statusCode) {
+                    const errorNode = this.apiConfig.ast.errors.find(node => node.name === error.type);
+                    const statusAnnotation = errorNode?.annotations.find(x => x instanceof StatusCodeAnnotation) as StatusCodeAnnotation | undefined;
+
+                    res.statusCode = statusAnnotation ? statusAnnotation.statusCode : error.type === "Fatal" ? 500 : 400;
+                  }
+
                   res.setHeader("content-type", "application/json");
                   res.write(JSON.stringify(error));
                   res.end();
@@ -529,7 +559,10 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
 
                   if (type instanceof OptionalType) {
                     if (reply.result === null) {
-                      res.statusCode = ann.method === "GET" ? 404 : 204;
+                      if (!ctx?.response.statusCode) {
+                        res.statusCode = ann.method === "GET" ? 404 : 204;
+                      }
+
                       res.end();
                       return;
                     }
@@ -546,6 +579,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
                     type instanceof DatePrimitiveType ||
                     type instanceof DateTimePrimitiveType ||
                     type instanceof MoneyPrimitiveType ||
+                    type instanceof DecimalPrimitiveType ||
                     type instanceof BigIntPrimitiveType ||
                     type instanceof CpfPrimitiveType ||
                     type instanceof CnpjPrimitiveType ||
@@ -609,7 +643,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
     }
   }
 
-  private handleRequest(req: IncomingMessage, res: ServerResponse) {
+  public handleRequest = (req: IncomingMessage, res: ServerResponse) => {
     const hrStart = process.hrtime();
 
     req.on("error", err => {
@@ -641,18 +675,24 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
       return;
     }
 
-    const body: Buffer[] = [];
+    const handleBody = (body: Buffer) => {
+      this.handleRequestWithBody(req, res, body, hrStart).catch((e: unknown) => this.writeReply(res, null, { error: e }, hrStart));
+    };
 
-    req.on("data", chunk => body.push(chunk));
+    // Google Cloud Functions add a rawBody property to the request object
+    if (has(req, "rawBody") && req.rawBody instanceof Buffer) {
+      handleBody(req.rawBody);
+    } else {
+      const body: Buffer[] = [];
 
-    req.on("end", () => {
-      this.handleRequestWithBody(req, res, Buffer.concat(body), hrStart).catch((e: unknown) => this.writeReply(res, null, { error: e }, hrStart));
-    });
-  }
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+      req.on("data", chunk => body.push(chunk));
 
-  private log(message: string) {
-    console.log(`${new Date().toISOString()} ${message}`);
-  }
+      req.on("end", () => {
+        handleBody(Buffer.concat(body));
+      });
+    }
+  };
 
   private async handleRequestWithBody(req: IncomingMessage, res: ServerResponse, body: Buffer, hrStart: [number, number]) {
     const { pathname, query } = parseUrl(req.url ?? "");
@@ -748,6 +788,9 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
     const ctx: Context & ExtraContextT = {
       ...this.extraContext,
       request,
+      response: {
+        headers: new Map(),
+      },
     };
 
     writeReply(ctx, await executeRequest(ctx, this.apiConfig));
@@ -1013,6 +1056,14 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
 
     this.log(`${ctx.request.id} [${duration.toFixed(6)}s] ${ctx.request.name}() -> ${reply.error ? this.makeResponseError(reply.error).type : "OK"}`);
 
+    if (ctx.response.statusCode) {
+      res.statusCode = ctx.response.statusCode;
+    }
+
+    for (const [headerKey, headerValue] of ctx.response.headers.entries()) {
+      res.setHeader(headerKey, headerValue);
+    }
+
     switch (ctx.request.version) {
       case 1: {
         const response = {
@@ -1025,7 +1076,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
           result: reply.error ? null : reply.result,
         };
 
-        if (response.error) {
+        if (response.error && !ctx.response.statusCode) {
           res.statusCode = this.makeResponseError(response.error).type === "Fatal" ? 500 : 400;
         }
 
@@ -1044,7 +1095,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
           sessionId: ctx.request.extra.sessionId,
         };
 
-        if (response.error) {
+        if (response.error && !ctx.response.statusCode) {
           res.statusCode = this.makeResponseError(response.error).type === "Fatal" ? 500 : 400;
         }
 
@@ -1061,7 +1112,7 @@ export class SdkgenHttpServer<ExtraContextT = unknown> {
           result: reply.error ? null : reply.result,
         };
 
-        if (response.error) {
+        if (response.error && !ctx.response.statusCode) {
           res.statusCode = this.makeResponseError(response.error).type === "Fatal" ? 500 : 400;
         }
 

@@ -7,7 +7,7 @@ export function generateAndroidClientSource(ast: AstRoot, shouldImplementCallbac
   let code = `@file:Suppress("UNNECESSARY_SAFE_CALL")
 
 import android.os.Parcelable
-import kotlinx.android.parcel.Parcelize
+import kotlinx.parcelize.Parcelize
 import android.content.Context
 import android.util.Base64
 import com.google.gson.*
@@ -17,7 +17,9 @@ import com.google.gson.annotations.SerializedName
 import io.sdkgen.runtime.SdkgenHttpClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.parcelize.RawValue
 import java.util.*
+import okhttp3.Interceptor
 
 inline fun <reified T> Gson.fromJson(json: String) =
     fromJson<T>(json, object : TypeToken<T>() {}.type)
@@ -29,8 +31,11 @@ inline fun <reified T> Gson.fromJson(json: JsonElement) =
 class ApiClient(
     baseUrl: String,
     val applicationContext: Context,
-    defaultTimeoutMillis: Long = 10000L
-) : SdkgenHttpClient(baseUrl, applicationContext, defaultTimeoutMillis) {
+    defaultTimeoutMillis: Long = 10000L,
+    fingerprint: String? = null,
+    httpInterceptor: Interceptor? = null,
+    httpNetworkInterceptor: Interceptor? = null
+) : SdkgenHttpClient(baseUrl, applicationContext, defaultTimeoutMillis, fingerprint, httpInterceptor, httpNetworkInterceptor) {
 
     private val gson = GsonBuilder()
         .registerTypeAdapter(object : TypeToken<ByteArray>() {}.type, ByteArrayDeserializer())

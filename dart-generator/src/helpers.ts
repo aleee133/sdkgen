@@ -17,6 +17,7 @@ import {
   IntPrimitiveType,
   JsonPrimitiveType,
   MoneyPrimitiveType,
+  DecimalPrimitiveType,
   OptionalType,
   StringPrimitiveType,
   StructType,
@@ -127,6 +128,8 @@ export function generateTypeName(type: Type): string {
       return "Uint8List";
     case MoneyPrimitiveType:
       return "int";
+    case DecimalPrimitiveType:
+      return "Decimal";
     case CpfPrimitiveType:
     case CnpjPrimitiveType:
     case EmailPrimitiveType:
@@ -158,12 +161,12 @@ export function generateTypeName(type: Type): string {
 
 export function generateErrorClass(error: ErrorNode): string {
   if (error.dataType instanceof VoidPrimitiveType) {
-    return `class ${error.name} extends SdkgenError {\n  ${error.name}(String msg) : super(msg);\n}\n`;
+    return `class ${error.name} extends SdkgenError {\n  ${error.name}(super.msg, super.request);\n}\n`;
   }
 
   const dataType = generateTypeName(error.dataType);
 
-  return `class ${error.name} extends SdkgenErrorWithData<${dataType}> {\n  ${error.name}(String msg, ${dataType} data) : super(msg, data);\n}\n`;
+  return `class ${error.name} extends SdkgenErrorWithData<${dataType}> {\n  ${error.name}(super.msg, super.request, super.data);\n}\n`;
 }
 
 export function cast(value: string, type: Type): string {
@@ -200,7 +203,7 @@ function generateConstructor(type: StructType): string {
 }
 
 function generateEquality(type: StructType): string {
-  let str = `  bool operator ==(other){\n`;
+  let str = `  @override\n  bool operator ==(other){\n`;
 
   str += `    if (identical(this, other)) return true;\n`;
   str += `    return ${[`other is ${type.name}`, ...type.fields.map(field => `${mangle(field.name)} == other.${mangle(field.name)}`)].join(
@@ -212,11 +215,11 @@ function generateEquality(type: StructType): string {
 }
 
 function generateHashcode(type: StructType): string {
-  return `  @override\n  int get hashCode => hashList([${type.fields.map(field => mangle(field.name)).join(", ")}]);\n`;
+  return `  @override\n  int get hashCode => Object.hashAllUnordered([${type.fields.map(field => mangle(field.name)).join(", ")}]);\n`;
 }
 
 function generateToString(type: StructType): string {
-  return `  String toString() {\n    return '${type.name} { ${type.fields
+  return `  @override\n  String toString() {\n    return '${type.name} { ${type.fields
     .map(field => `${field.name}: $${mangle(field.name).startsWith("$") ? `{${mangle(field.name)}}` : mangle(field.name)}`)
     .join(", ")} }';\n  }\n`;
 }

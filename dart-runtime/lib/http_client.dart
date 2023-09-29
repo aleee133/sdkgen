@@ -12,94 +12,159 @@ import 'deviceinfo_generic.dart'
     if (dart.library.html) 'deviceinfo_web.dart';
 
 class SdkgenError implements Exception {
-  String message;
-  SdkgenError(this.message);
+  final String message;
+  final Json request;
+  const SdkgenError(this.message, [this.request = const {}]);
+
+  @override
+  String toString() => '$runtimeType: $message';
 }
 
-class SdkgenErrorWithData<T> implements Exception {
-  String message;
-  T data;
-  SdkgenErrorWithData(this.message, this.data);
+class SdkgenErrorWithData<T> extends SdkgenError {
+  final T data;
+  const SdkgenErrorWithData(super.message, super.request, this.data);
+
+  @override
+  String toString() => '$runtimeType: $message';
+}
+
+class SdkgenInterceptors {
+  Future Function(Map<String, dynamic> body)? onRequest;
+  Future Function(dynamic error)? onError;
+  Future Function(dynamic response)? onResponse;
 }
 
 class SdkgenHttpClient {
-  Uri baseUrl;
-  Map<String, dynamic> extra = <String, dynamic>{};
-  Map<String, String> headers = <String, String>{
+  final Uri baseUrl;
+  final http.Client _client;
+
+  final Map<String, dynamic> extra = <String, dynamic>{};
+  final Map<String, String> headers = <String, String>{
     'Content-Type': 'application/sdkgen',
   };
-  Map<String, Object> typeTable;
-  Map<String, FunctionDescription> fnTable;
-  Map<String, SdkgenErrorDescription> errTable;
+  final Map<String, Object> typeTable;
+  final Map<String, FunctionDescription> fnTable;
+  final Map<String, SdkgenErrorDescription> errTable;
+  final Random random = Random.secure();
+  final SdkgenInterceptors interceptors = SdkgenInterceptors();
+
   String? deviceId;
-  Random random = Random.secure();
 
-  SdkgenHttpClient(baseUrl, this.typeTable, this.fnTable, this.errTable)
-      : baseUrl = Uri.parse(baseUrl);
+  SdkgenHttpClient(
+    String baseUrl,
+    http.Client? client,
+    this.typeTable,
+    this.fnTable,
+    this.errTable,
+  )   : baseUrl = Uri.parse(baseUrl),
+        _client = client ?? http.Client();
 
-  String _randomBytesHex(int bytes) {
-    return hex.encode(List<int>.generate(bytes, (i) => random.nextInt(256)));
-  }
+  String _randomBytesHex(int bytes) => hex.encode(List<int>.generate(
+        bytes,
+        (i) => random.nextInt(256),
+        growable: false,
+      ));
 
-  dynamic _throwError(String type, String message, dynamic data) {
-    var description = errTable[type] ?? errTable['Fatal']!;
-    var decodedData =
-        decode(typeTable, '$type.data', description.dataType, data);
-    throw Function.apply(description.create, [message, decodedData]);
+  SdkgenError _createError(
+    String type,
+    String message,
+    dynamic data,
+    Json request,
+  ) {
+    final description = errTable[type] ?? errTable['Fatal']!;
+    final decodedData = decode(
+      typeTable,
+      '$type.data',
+      description.dataType,
+      data,
+    );
+    return Function.apply(
+      description.create,
+      [message, request, decodedData],
+    );
   }
 
   Future<String> _deviceId() async {
     if (deviceId == null) {
-      var prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
       if (prefs.containsKey('sdkgen_deviceId')) {
         deviceId = prefs.getString('sdkgen_deviceId');
       } else {
         await prefs.setString(
-            'sdkgen_deviceId', deviceId = _randomBytesHex(16));
+          'sdkgen_deviceId',
+          deviceId = _randomBytesHex(16),
+        );
       }
     }
     return deviceId!;
   }
 
   Future<Object?> makeRequest(
-      String functionName, Map<String, Object> args) async {
-    try {
-      var func = fnTable[functionName]!;
-      var encodedArgs = {};
-      args.forEach((argName, argValue) {
-        encodedArgs[argName] = encode(typeTable, '$functionName.args.$argName',
-            func.args[argName]!, argValue);
-      });
+    String functionName,
+    Map<String, Object?> args,
+  ) async {
+    final Json requestInfo = {
+      'requestId': _randomBytesHex(16),
+      'name': functionName,
+    };
 
-      var body = {
+    try {
+      final func = fnTable[functionName]!;
+      final encodedArgs = args.map(
+        (argName, argValue) => MapEntry(
+          argName,
+          encode(
+            typeTable,
+            '$functionName.args.$argName',
+            func.args[argName]!,
+            argValue,
+          ),
+        ),
+      );
+
+      requestInfo['args'] = encodedArgs;
+
+      final Json body = {
+        ...requestInfo,
         'version': 3,
-        'requestId': _randomBytesHex(16),
-        'name': functionName,
-        'args': encodedArgs,
         'extra': extra,
         'deviceInfo': await getDeviceInfo(await _deviceId())
       };
 
-      var response = await http.post(
+      await interceptors.onRequest?.call(body);
+
+      final response = await _client.post(
         baseUrl,
         headers: headers,
         body: jsonEncode(body),
       );
 
-      var responseBody = jsonDecode(utf8.decode(response.bodyBytes));
+      final responseBody = jsonDecode(utf8.decode(response.bodyBytes));
 
       if (responseBody['error'] != null) {
-        throw _throwError(responseBody['error']['type'],
-            responseBody['error']['message'], responseBody['error']['data']);
+        throw _createError(
+          responseBody['error']['type'],
+          responseBody['error']['message'],
+          responseBody['error']['data'],
+          requestInfo,
+        );
       } else {
-        return decode(
+        final response = decode(
             typeTable, '$functionName.ret', func.ret, responseBody['result']);
+
+        await interceptors.onResponse?.call(response);
+
+        return response;
       }
     } catch (e) {
-      if (e is SdkgenError || e is SdkgenErrorWithData) {
+      if (e is SdkgenError) {
+        await interceptors.onError?.call(e);
         rethrow;
       } else {
-        throw _throwError('Fatal', e.toString(), null);
+        final error = _createError('Fatal', e.toString(), null, requestInfo);
+        await interceptors.onError?.call(error);
+
+        throw error;
       }
     }
   }

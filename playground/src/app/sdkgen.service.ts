@@ -31,6 +31,7 @@ import {
   VoidPrimitiveType,
   XmlPrimitiveType,
   EnumType,
+  DecimalPrimitiveType,
 } from "@sdkgen/parser";
 import { BehaviorSubject } from "rxjs";
 
@@ -46,7 +47,7 @@ export interface SdkgenState {
 export class SdkgenService {
   public state$ = new BehaviorSubject<SdkgenState | null>(null);
 
-  public buildJsonObject(args: Field[]) {
+  public buildJsonObject(args: Field[], visited = new Set<string>()) {
     const getTypeValue = (type: Type): any => {
       switch (type.constructor) {
         case StringPrimitiveType:
@@ -58,6 +59,9 @@ export class SdkgenService {
         case BigIntPrimitiveType:
         case MoneyPrimitiveType:
           return 0;
+
+        case DecimalPrimitiveType:
+          return "0.00";
 
         case DatePrimitiveType:
           return new Date().toJSON().substring(0, 10);
@@ -106,7 +110,9 @@ export class SdkgenService {
           return {};
 
         case StructType:
-          return this.buildJsonObject((type as StructType).fields);
+          return visited.has(type.name)
+            ? {}
+            : this.buildJsonObject((type as StructType).fields, new Set([...visited, type.name]));
 
         case OptionalType:
           return null;
@@ -151,6 +157,9 @@ export class SdkgenService {
         case BigIntPrimitiveType:
         case MoneyPrimitiveType:
           return 0;
+
+        case DecimalPrimitiveType:
+          return 'BigDecimal("0.00")';
 
         case DatePrimitiveType:
         case DateTimePrimitiveType:
@@ -245,12 +254,14 @@ export class SdkgenService {
   }
 
   public getSdkgenClient(url: string, ast: DeepReadonly<AstJson>) {
-    const errorFns = ast.errors.reduce<{
-      [className: string]:
+    const errorFns = ast.errors.reduce<
+      Record<
+        string,
         | (new (message: string, data: any) => SdkgenErrorWithData<any>)
         | (new (message: string) => SdkgenError)
-        | undefined;
-    }>((acc, cur) => {
+        | undefined
+      >
+    >((acc, cur) => {
       function errorClass(type: string, base: typeof SdkgenError | typeof SdkgenErrorWithData) {
         return eval(`(
           (sup) => class ${type} extends sup {
